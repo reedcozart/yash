@@ -10,20 +10,30 @@
 
 #define MBSH_TOK_BUFFSIZE 64
 #define MBSH_TOK_DELIM " "
-//Main Loop
-int main(int argc, char** argv){
-    
-    //welcome message
-    printf("Hello! Welcome to Reed's Project 1 shell (mbsh)");
-    
-    //run the shell loop
-    mbsh_loop();
 
-    return EXIT_SUCCESS;
-}
+//function declarations for built-in shell commands
+int mbsh_cd(char** args);
+int mbsh_help(char** args);
+int mbsh_exit(char** args);
+
+char* builtin_str[] = {
+    "cd",
+    "help",
+    "exit"
+};
+
+int (*builtin_func[])(char**) = {
+    &mbsh_cd,
+    &mbsh_help,
+    &mbsh_exit
+};
 
 
 /*********************** SUBROUTINES ************************/
+int num_builtins(){
+    return sizeof(builtin_str) / sizeof(char*);
+}
+
 void mbsh_loop(void){
     char* line;
     char** args;
@@ -101,8 +111,33 @@ int mbsh_launch(char** args){
     return 1;
 }
 
+int mbsh_execute(char** args){
+    int i;
 
+    if(args[0] == NULL){
+        //empty command.
+        return 1;
+    }    
+    for(i = 0; i < num_builtins(); i++){
+        if(strcmp(args[0], builtin_str[i] == 0)){
+            return (*builtin_func[i])(args);
+        }
+    }
 
+    mbsh_launch(args);
+}
+
+/*******************  Main Loop  ************************/
+int main(int argc, char** argv){
+    
+    //welcome message
+    printf("Hello! Welcome to Reed's Project 1 shell (mbsh)");
+    
+    //run the shell loop
+    mbsh_loop();
+
+    return EXIT_SUCCESS;
+}
 
 
 
