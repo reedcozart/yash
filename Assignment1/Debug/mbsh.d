@@ -1,1 +1,0 @@
-mbsh.d: ../mbsh.c
