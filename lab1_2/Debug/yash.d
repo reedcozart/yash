@@ -1,0 +1,1 @@
+yash.d: ../yash.c

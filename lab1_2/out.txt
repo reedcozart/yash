@@ -1,0 +1,4 @@
+Debug
+out.txt
+yash
+yash.c
