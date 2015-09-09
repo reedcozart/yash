@@ -52,6 +52,7 @@ typedef struct job {
 	char notified;
 	int job_is_bg;
 	int stopped;
+	int need_to_print;
 	struct termios tmodes;
 	int stdin, stdout, stderr;
 	int num;
@@ -74,53 +75,57 @@ int job_is_completed (job *j);
 int job_is_stopped (job *j);
 int mark_process_status (pid_t pid, int status);
 job* find_recent_bg_stopped(job* first_job);
+job * find_job (pid_t pgid);
+int job_is_completed (job *j);
+int job_is_stopped (job *j);
+void continue_job (job *j, int foreground);
+void mark_job_as_running (job *j);
 
-job* find_recent_bg_stopped(job* first_job){
-	job* j;
-	job* most_recent = NULL;
-
-	for(j = first_job; j->next; j=j->next){
-		if((j->job_is_bg || j->stopped) && !job_is_completed(j))
-			most_recent = j;
-	}
-	return most_recent;
-}
-
-job* find_recent_stopped(job* first_job){
-	job* j;
-	job* most_recent = NULL;
-
-	for(j = first_job; j->next; j=j->next){
-		if(j->stopped && !job_is_completed(j))
-			most_recent = j;
-	}
-	return most_recent;
-}
 
 
 void yash_init(){
 
 	shell_terminal = STDIN_FILENO;
-	while (tcgetpgrp (shell_terminal) != (shell_pgid = getpgrp ()))
-	        kill (- shell_pgid, SIGTTIN);
+	//while (tcgetpgrp (shell_terminal) != (shell_pgid = getpgrp ()))
+	//        kill (- shell_pgid, SIGTTIN);
 
-	signal (SIGINT, SIG_IGN);
-	signal (SIGQUIT, SIG_IGN);
+	signal (SIGINT, yash_sigint_handler);
+	//signal (SIGQUIT, SIG_IGN);
 	signal (SIGTSTP, yash_sigtstp_handler);
-	signal (SIGTTIN, SIG_IGN);
-	signal (SIGTTOU, SIG_IGN);
-	signal (SIGCHLD, SIG_IGN);
+	//signal (SIGTTIN, SIG_DFL);
+	signal (SIGTTOU, SIG_DFL);
+	signal (SIGCHLD, yash_sigchld_handler);
 
 	shell_pgid = getpid();
 	return;
 }
 job* first_job = NULL;
 
+void yash_sigint_handler(int signo){
+	//get most recent job
+	process* p;
+	job* j;
+	//fprintf(stdout, "Yash SIGTSTP handler triggered");
+	if(first_job == NULL) return;
+	for(j= first_job; j->next; j=j->next){
+	}
+	if(job_is_completed(j)) return;
+	for(p = j->first_process; p; p = p->next){
+		if(kill(p->pid, SIGINT) < 0)
+			perror("yash: kill(SIGTSTP)");
+		p->completed = 1;
+	}
+
+	fflush(stdout);
+	fflush(stdin);
+}
+
 void yash_sigtstp_handler(int signo){
 	//get most recent job
 	process* p;
 	job* j;
-	fprintf(stdout, "Yash SIGTSTP handler triggered");
+	//fprintf(stdout, "Yash SIGTSTP handler triggered");
+	signal(SIGTSTP, yash_sigtstp_handler);
 	for(j= first_job; j->next; j=j->next){
 	}
 
@@ -129,43 +134,110 @@ void yash_sigtstp_handler(int signo){
 	for(p = j->first_process; p; p = p->next){
 		if(kill(p->pid, SIGTSTP) < 0)
 			perror("yash: kill(SIGTSTP)");
+		p->stopped = 1;
 	}
+	if(!job_is_stopped(j))
+		perror("yash: unable to stop job");
+	if(job_is_stopped(j))
+		j->stopped = 1;
+	fflush(stdout);
+	fflush(stdin);
+}
+
+void yash_sigchld_handler(int signo){
+	pid_t pid_r;
+	pid_t pid;
+	int status;
+	job* j, j2, j3;
+	process* p, p2, p3;
+	int fbreak = 0;
+
+	do{
+		signal(SIGCHLD, yash_sigchld_handler);
+		pid = waitpid(-1, &status, WUNTRACED | WNOHANG);
+		for(j = first_job; j; j=j->next){
+			if(fbreak) break;
+			for(p = j->first_process; p; p=p->next){
+				if(p->pid == pid){
+					if(WIFEXITED (status) && j->job_is_bg){
+						j->need_to_print = 1;
+						j->stopped = 0;
+						for(p = j->first_process; p; p=p->next){
+							p->completed = 1;
+						}
+						return;
+					}
+
+				}
+			}
+		}
+
+	}while(pid > 0);
+
+
+	fflush(stdout);
+	fflush(stdin);
 }
 
 void yash_loop(){
 	char* line;
 	char** line_tokenized;
 	job* j;
+	job* jprint;
 	int foreground = 1;
 
 	do{
 		signal(SIGTSTP, yash_sigtstp_handler);
 		fflush(stdout);
+		fflush(stdin);
 		line = readline("$ ");
+		for(jprint = first_job; jprint; jprint=jprint->next){
+			char most_recent;
+			if(jprint->next == NULL)
+				most_recent = '+';
+			else
+				most_recent = '-';
+
+			if(jprint->need_to_print){
+				fprintf(stdout, "[%d] %c Done %s \n", jprint->num, most_recent, jprint->command );
+			}
+			jprint->need_to_print = 0;
+		}
+
 		if(line == NULL){
 			//printf("line == null, EOF encountered, closing terminal");
 			return;
 		}
 		if(strcmp(line, "fg") == 0){
-			job* bg_or_stopped = find_recent_bg_stopped(first_job);
+			job* bg_or_stopped = NULL;
+			job* j;
+			for(j = first_job; j; j=j->next){
+				if(j->stopped || j->job_is_bg){
+					bg_or_stopped = j;
+				}
+			}
 			if(bg_or_stopped != NULL){
-				yash_put_job_in_fg(bg_or_stopped, 1);
-				fprintf(stdout, "%s\n", bg_or_stopped->command);
+				continue_job(bg_or_stopped, 1);
+				fprintf(stdout, "\n%s\n", bg_or_stopped->command);
+			}else{
+				perror("yash: no background or stopped jobs to bring to foreground\n");
 			}
 			continue;
 		}
 		if(strcmp(line, "bg") == 0){
-			char most_recent;
-			job* stopped = find_recent_stopped(first_job);
+			job* stopped = NULL;
+			for(j = first_job; j; j=j->next){
+				if(job_is_stopped(j) && !job_is_completed(j)){
+					stopped = j;
+				}
+			}
 			if(stopped == NULL){
 				perror("yash: no stopped jobs to send to background");
 				continue;
 			}
-			if(stopped != NULL)
-				yash_put_job_in_bg(stopped, 1);
-			if(stopped->next == NULL) most_recent = '+';
-			else most_recent = '-';
-			printf("[%d] %c %s &\n", stopped->num, most_recent, stopped->command);
+			continue_job(stopped, 0);
+			fflush(stdout);
+			fprintf(stdout, "%s &\n", stopped->command);
 			continue;
 		}
 		if(strcmp(line, "jobs") == 0){
@@ -185,8 +257,7 @@ void yash_loop(){
 					most_recent = '-';
 				}
 				if(j == NULL) break;
-				if(j->num == NULL) printf("j->num is NULL");
-				if(j->command == NULL) printf("j->command is NULL");
+				if(job_is_completed(j)) continue;
 				printf("[%d] %c %s		%s\n", j->num, most_recent, running_stopped, j->command);
 
 
@@ -200,7 +271,9 @@ void yash_loop(){
 				j->num = job_num;
 				j->first_process = NULL;
 				j->next = NULL;
+				j->need_to_print = 0;
 				j->job_is_bg = 0;
+				//j->pgid = job_num;
 				first_job = j;
 				yash_configure_job(j, line, line_tokenized, token_count, &foreground);
 				yash_launch_job(j, foreground);
@@ -212,7 +285,9 @@ void yash_loop(){
 				next_j = malloc(sizeof(job));
 				j->next = next_j;
 				next_j->num = job_num;
+				//next_j->pgid = job_num;
 				next_j->first_process = NULL;
+				next_j->need_to_print = 0;
 				next_j->next = NULL;
 				next_j->job_is_bg = 0;
 				yash_configure_job(next_j, line, line_tokenized, token_count, &foreground);
@@ -234,8 +309,10 @@ void yash_configure_job(job* j, char* line, char** line_tokenized, int token_cou
 	p->infile = STDIN_FILENO;
 	p->outfile = STDOUT_FILENO;
 	p->errfile = STDERR_FILENO;
+	p->completed = 0;
 	p->argv = malloc(500);
 	p->next = NULL;
+	p->pid = 0;
 	if(j->first_process == NULL){
 		j->first_process = p;
 	}else{
@@ -288,6 +365,8 @@ void yash_configure_job(job* j, char* line, char** line_tokenized, int token_cou
 			new_p->outfile = STDOUT_FILENO;
 			new_p->errfile = STDERR_FILENO;
 			new_p->next = NULL;
+			new_p->pid = 0;
+			new_p->completed = 0;
 			new_p->argv = malloc(sizeof(500));
 			argv_counter = 0;
 			p->next = new_p;
@@ -313,17 +392,19 @@ void yash_launch_process(process* p, pid_t pgid, int foreground){
 	pid_t pid;
 
 	pid = getpid();
-	//fprintf(stdout, "IM A CHILD MY PID IS %d GPID IS %d\n", pid, pgid);
 	if(pid == 0) pgid = pid;
-	setpgid(pid, pgid);
-	if(foreground) tcsetpgrp(shell_terminal, pgid); //set this process as the foreground process
-    /* Set the handling for job control signals back to the default.  */
-    signal (SIGINT, SIG_DFL);
+	//setpgid(pid, pgid);
+	//fflush(stdout);
+	//fprintf(stdout, "IM A CHILD MY PID IS %d GPID IS %d status %d\n", pid, pgid, p->status);
+	//if(foreground) tcsetpgrp(shell_terminal, pgid); //set this process as the foreground process
+
+	/* Set the handling for job control signals back to the default.  */
+    signal (SIGINT, yash_sigint_handler);
     signal (SIGQUIT, SIG_DFL);
     signal (SIGTSTP, yash_sigtstp_handler);
-    signal (SIGTTIN, SIG_DFL);
-    signal (SIGTTOU, SIG_DFL);
-    signal (SIGCHLD, SIG_DFL);
+    signal (SIGTTIN, SIG_IGN);
+    signal (SIGTTOU, SIG_IGN);
+    signal (SIGCHLD, yash_sigchld_handler);
 
     if(p->infile != STDIN_FILENO){
     	if(dup2(p->infile, STDIN_FILENO) < 0)
@@ -342,6 +423,7 @@ void yash_launch_process(process* p, pid_t pgid, int foreground){
     }
     execvp(p->argv[0], p->argv);
     fprintf(stderr, "yash: %s: command not found\n", p->argv[0]);
+
     _exit(1);
 }
 
@@ -356,6 +438,7 @@ void yash_launch_job(job* j, int foreground){
 
 		/* Fork the child process*/
 		pid = fork();
+		p->pid = pid;
 		if(pid == 0){
 			yash_launch_process(p, j->pgid,
 								 foreground);
@@ -364,16 +447,13 @@ void yash_launch_job(job* j, int foreground){
 			_exit(1);
 		}else{
 			/* This is the parent process*/
+
 			signal(SIGTSTP, yash_sigtstp_handler);
-			p->pid = pid;
 			if(!j->pgid)
 				j->pgid = pid;
 			setpgid(pid, j->pgid);
-			if(foreground){
-				yash_put_job_in_fg(j, cont);
-			}else{
-				yash_put_job_in_bg(j, cont);
-			}
+			//fflush(stdout);
+			//fprintf(stdout, "Im a parrent: pid %d pgid %d\n p->status %d\n", pid, j->pgid, p->status);
 			//clean up after pipes
 			if (p->outfile != STDOUT_FILENO)
 				close (p->outfile);
@@ -382,46 +462,80 @@ void yash_launch_job(job* j, int foreground){
 
 		}
 	}
+	if(foreground){
+		yash_put_job_in_fg(j, cont);
+	}else{
+		yash_put_job_in_bg(j, cont);
+	}
 }
 
 void yash_put_job_in_fg(job* j, int cont){
-	tcsetpgrp(shell_terminal, j->pgid);
+	//tcsetpgrp(shell_terminal, j->pgid);
 	//get last process, wait for that one
+//	if(cont){
+//
+//		if(kill(-j->pgid, SIGCONT) < 0)
+//			perror("kill (SIGCONT), couldn't put job in foreground");
+//	}
+	process* p;
 	if(cont){
-		if(kill(-j->pgid, SIGCONT) < 0)
-			perror("kill (SIGCONT), couldn't put job in foreground");
+		for(p = j->first_process; p; p=p->next){
+			if(kill(p->pid, SIGCONT) < 0){
+				perror("kill (SIGCONT) couldnt put job in foreground\n");
+			}
+		}
 	}
+	mark_job_as_running(j);
 	j->job_is_bg = 0;
 	//wait for each process in the job to complete before continuing.
 	wait_for_job(j);
 
 	//return shell to foreground
-	tcsetpgrp(shell_terminal, shell_pgid);
+	//tcsetpgrp(shell_terminal, shell_pgid);
 	return;
 }
 
 void yash_put_job_in_bg(job* j, int cont){
-	j->job_is_bg = 1;
+
+	process* p;
 	if(cont){
-		if(kill(-j->pgid, SIGCONT) < 0){
-			perror("kill (SIGCONT), couldn't put job in background");
+		for(p = j->first_process; p; p=p->next){
+			if(kill(p->pid, SIGCONT) < 0){
+				perror("kill (SIGCONT), couldn't put job in background");
+				_exit(1);
+			}
+
 		}
 	}
+	j->job_is_bg = 1;
+	mark_job_as_running(j);
 }
 void wait_for_job(job *j){
     int status;
     pid_t pid;
     process* p;
 
+    for(p= j->first_process; p; p=p->next){
+    	pid = waitpid(p->pid, &status, WUNTRACED);
+    	mark_process_status(pid, status);
+    	if(job_is_stopped(j))
+    		break;
+    	if(job_is_completed(j))
+    		break;
+    }
+
+
+
+
 //    do{
-//        pid = waitpid(WAIT_ANY, &status, WUNTRACED); //WAIT_ANY is -1
+//        pid = waitpid(p->pid, &status, WUNTRACED); //WAIT_ANY is -1
+//
+//        if(pid<0){
+//        	fprintf(stderr, "yash: waitpid returned in error: errno - %d ",errno  );
+//        	//_exit(1);
+//        }
 //    } while(!mark_process_status(pid, status) && !job_is_stopped(j) && !job_is_completed(j));
 
-    for(p = j->first_process; p; p=p->next){
-    	do{
-    		pid = waitpid(p->pid, &status, WUNTRACED); //WAIT_ANY is -1
-    	} while(!mark_process_status(pid, status) && !job_is_stopped(j) && !job_is_completed(j));
-    }
 }
 
 int mark_process_status (pid_t pid, int status){
@@ -437,9 +551,9 @@ int mark_process_status (pid_t pid, int status){
                 p->stopped = 1;
               else{
                   p->completed = 1;
-                  if (WIFSIGNALED (status))
-                    fprintf (stderr, "%d: Terminated by signal %d.\n",
-                             (int) pid, WTERMSIG (p->status));
+                  //if (WIFSIGNALED (status))
+                    //fprintf (stderr, "%d: Terminated by signal %d.\n",
+                             //(int) pid, WTERMSIG (p->status));
                 }
               return 0;
              }
@@ -498,16 +612,17 @@ void mark_job_as_running (job *j){
 
   for (p = j->first_process; p; p = p->next)
     p->stopped = 0;
+  j->stopped = 0;
   j->notified = 0;
 }
 /* Continue the job J.  */
 
 void continue_job (job *j, int foreground){
-  mark_job_as_running (j);
-  if (foreground)
+	if (foreground)
     yash_put_job_in_fg (j, 1);
   else
     yash_put_job_in_bg (j, 1);
+
 }
 
 /* Return true if all processes in the job have stopped or completed.  */
