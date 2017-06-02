@@ -12,4 +12,4 @@ The features of this shell include
   * ability to move jobs from bg into fg, and vice versa 
   * I/O redirection including piping data from one job to another or writing/reading of files
   
-
+This shell was written and tested on Ubuntu Linux distrobution.
